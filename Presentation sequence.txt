@@ -1,0 +1,20 @@
+
+1. Register new user
+2. Log in [With Yining Account] [Secondary Rachel account to fund yining's new project]
+3. Top 3 features: Top fan, Common Interest, Top donor for category/
+4. Create a new project, have someone fund it, (note that change in status), have someone withdraw fund it(show the change in status again)
+5. Have someone fully fund it again, then refresh the deadline to show "successful status:
+
+
+6. Admin Log in
+7. Log in as GaoShei -> try to create new project but fails cuz of low credibility score
+8. Admin -> Reset credibility score for GaoShei
+9. (GaoShei) create a new project to show it works!
+10.  (GaoShei) Log out
+11. (Admin) Ban GaoShei
+12.  (GaoShei) Try to re-login but fail
+
+
+
+http://localhost/crowdfundingfinal/CrowdFunding/php/myProj.php
+update project set deadline = TO_DATE('2019-11-12', 'YYYY/MM/DD') where pid = 123;

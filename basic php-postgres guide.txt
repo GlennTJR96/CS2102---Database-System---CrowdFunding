@@ -1,0 +1,67 @@
+To connect to postgres using PHP.
+*For Grpmates*
+
+(1) Download XAMPP from https://www.apachefriends.org/download.html 
+(2) Choose default settings to download. NOTE: Make sure "Apache" is clicked yes! 
+	- Apache is a web server software used to run PHP codes.
+(3) Install XAMPP in (C:)
+(4) Go to C:\xampp\php\php.ini (OR php.config), uncomment the following lines:
+		extension=php_pdo_mysql.dll
+		extension=php_pdo_pgsql.dll
+		extension=php_pdo_sqlite.dll
+		
+		*These allow PHP to make use these extension to connect to postgres!*
+		
+(5) Go to your postgres folder, search for "libpq.dll" --> I believe this is postgres's library/API for other software to integrate with postgres
+(6) Copy the "libpq.dll" file, and paste it to: C:\xampp\php\ext. 
+(7) Ensure that "libpq.dll" file exist in both the xampp and postgres folder!
+(8) SETUP done.
+(9) Note for php files, after you run XAMPP, you click "Start" button of Apache. This will start the apache server to run PHP codes.
+(10) Verify that apache works by going to your browser, enter "localhost". This should bring you to the apache localhost homepage.
+(11) For ALL php files to be edited, note that it should be placed in : C:\xampp\htdocs !
+		Create your respective folder. 
+			Eg: If you create a folder "cs2102proj", and you add your PHP file in it. EG: index.php
+				To access this page, you type "localhost/cs2102proj/index.php
+				
+(12) To create a php file, just create a new file from your notepad++ or any other editor and save it as " .php"
+(13) Sample code to test:
+		
+-------------------------------------------- START OF CODE -------------------------------------------------------		
+		<?php
+			$link = pg_connect("host=localhost port=5432 dbname=postgres user=postgres password=postgres");
+			$query = " SELECT * FROM normaluser;";
+			$res = pg_query($link,$query);
+	
+			echo "<table>";
+
+			while ($row = pg_fetch_row($res)) {
+			  echo "Name: $row[0]  Password: $row[1]   email: $row[2]    activation: $row[3]";
+			  echo "<br />\n";
+			}
+
+
+		?>
+
+		<html>
+			<head> 
+				<title> woohoo </title>
+			</head>
+			<body>
+				<h1> testing. . . </h1>
+			</body>			
+		</html>
+-------------------------------------------- END OF CODE -------------------------------------------------------		
+
+	$link: -> pg_connect is a php method to connect to your postgres. Change your dbname, username and pw accordingly.
+	$query : -> instantiate a variable called query, and assign the string value of "SELECT * FROM normaluser;" to it.
+	$res : pg_query() takes in the $link (db connection) in the first Argument, and the $query (query) in the second Argument.
+	*ignore <table> , it is a HTML syntax*
+	
+	pg_fetch_row($res) will fetch a single row and assign it to $row. therefore I run a loop to fetch every row till the end.
+	$row is an array, size depending on the number of columns.
+	
+	
+(14) Save this code in your index.php.
+(15) Ensure it is saved in the correct folder.
+(16) Go to ur browser and enter into the URL : "localhost/cs2102proj/index" 
+(17) It should work 

@@ -1,0 +1,624 @@
+/* Drop all tables code*/
+DROP SCHEMA public CASCADE;
+CREATE SCHEMA public;
+
+
+/* Admin table*/
+CREATE TABLE Admin (
+    name    varchar(100),
+    password    varchar(100) NOT NULL,
+    email 	varchar(100) NOT NULL,
+    PRIMARY KEY(name),
+	UNIQUE (email)
+);
+
+/* NormalUser table*/
+CREATE TABLE NormalUser (
+    name    varchar(100),
+    password    varchar(100) NOT NULL,
+    email 	varchar(100) NOT NULL,
+    Is_activated boolean DEFAULT TRUE,
+    PRIMARY KEY(name),
+	UNIQUE (email)
+);
+
+/*Status categories: “Ongoing”, “Fully funded”, “Successful”, “Unsuccessful” , “Cancelled”, “Suspended” */
+
+/* Managed Category (combination of Category & Manages) */
+/*logRecord is reason for remarks*/
+CREATE TABLE ManagedCategory (
+    catName varchar(50),
+    managedByName varchar(100) NOT NULL,
+    description varchar(250),
+    Is_valid boolean DEFAULT TRUE,
+    logRecord varchar(250),
+    PRIMARY KEY(catName),
+    FOREIGN KEY(managedByName) references Admin
+);
+
+/*Project Table*/
+CREATE TABLE Project (
+    pId serial,
+    startDate DATE NOT NULL,
+    deadLine DATE NOT NULL,
+    targetAmt numeric(10,2) NOT NULL,
+    status varchar(50) DEFAULT 'On-going' NOT NULL,
+    adminName varchar(250),
+    catName varchar(50) REFERENCES ManagedCategory(catName) ON UPDATE CASCADE,     /*incase admin change the catName!*/
+    projectDescription varchar(250), /*for user to enter the description of his projecc*/
+    creatorName varchar(250),
+    Is_countedInCredibilityScore boolean DEFAULT TRUE,
+    PRIMARY KEY (pId),
+    FOREIGN KEY(adminName) references Admin(name),
+    FOREIGN KEY(creatorName) references NormalUser(name),
+    CHECK(deadLine >= startDate)
+);
+
+
+
+/*ProjectTiersTable*/ /*Total constraint from projects not captured*/
+CREATE TABLE ProjectTiers (
+    tier integer,
+    description varchar(250),
+    amount integer NOT NULL,
+    pId integer,
+
+    PRIMARY KEY(tier, pId),
+    FOREIGN KEY(pId) REFERENCES Project /* ON DELETE cascade, a project cannot be deleted, it can only be set to be other status like Cancelled, Suspended */
+);
+
+/* Create Funds*/
+CREATE TABLE Funds (
+    pId integer REFERENCES Project,
+    funderName varchar(250),
+    famount integer NOT NULL,
+    fdate date NOT NULL,
+    PRIMARY KEY (pId, funderName),
+    FOREIGN KEY(funderName) REFERENCES NormalUser(name)
+);
+
+
+
+
+
+
+/******************************** Triggers ****************************************/
+
+/* trigger to check admin cannot be a normal user and normal user cannot be an admin*/
+CREATE OR REPLACE FUNCTION func_checkInsert()
+RETURNS TRIGGER AS 
+$$ BEGIN
+	IF EXISTS(SELECT 1 FROM NormalUser WHERE NEW.email = NormalUser.email)
+THEN RAISE EXCEPTION 'Account not created because it already exists!';
+RETURN NULL;
+	ELSIF EXISTS(SELECT 1 FROM Admin WHERE NEW.email = Admin.email)
+	THEN RAISE EXCEPTION 'Account not created because it already exists!';
+RETURN NULL;
+ELSIF EXISTS (SELECT 1 FROM Admin where NEW.name = Admin.name)
+THEN RAISE EXCEPTION 'Account not created because it already exists!';
+RETURN NULL;
+ ELSIF EXISTS (SELECT 1 FROM NormalUser where NEW.name = NormalUser.name)
+THEN RAISE EXCEPTION 'Account not created because it already exists!';
+ RETURN NULL;
+	
+	END IF;
+	RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER check_insertAdmin
+BEFORE INSERT ON Admin 
+FOR EACH ROW
+EXECUTE PROCEDURE func_checkInsert();
+
+CREATE TRIGGER check_insertNormalUser
+BEFORE INSERT ON NormalUser 
+FOR EACH ROW
+EXECUTE PROCEDURE func_checkInsert();
+
+
+/*trigger to check new deadline cannot be earlier than start date [UPDATED]*/
+CREATE OR REPLACE FUNCTION func_checkDate()
+RETURNS TRIGGER AS 
+$$ BEGIN
+
+    IF NEW.startDate >= NEW.deadLine     THEN RETURN NULL;
+    ELSIF  NEW.startDate <> CURRENT_DATE THEN RETURN NULL;  
+    
+    END IF;
+    RETURN NEW;
+    
+
+END;
+$$ LANGUAGE plpgsql;
+
+
+CREATE TRIGGER check_insertProject
+BEFORE INSERT ON PROJECT
+FOR EACH ROW
+EXECUTE PROCEDURE func_checkDate();
+
+/* trigger to check only ongoing/fully funded project can be funded*/
+CREATE OR REPLACE FUNCTION func_funders()
+RETURNS TRIGGER AS
+$$ BEGIN
+
+    IF ((select project.creatorname from project where project.pid = NEW.pid) =  NEW.fundername)
+    THEN RETURN NULL;
+    ELSEIF ((select project.status from project where project.pid = NEW.pid) = 'On-going' )
+    THEN RETURN NEW;
+    ELSEIF ((select project.status from project where project.pid = NEW.pid) = 'Fully Funded' )
+    THEN RETURN NEW;
+
+    END IF;
+    RETURN NULL;
+
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER check_insertFunds
+BEFORE INSERT ON funds
+FOR EACH ROW
+EXECUTE PROCEDURE func_funders();
+
+
+
+/* trigger to change the status of the project after new / withdrawal of funds*/
+CREATE OR REPLACE FUNCTION tally_projectFunds()
+RETURNS TRIGGER AS
+$$ DECLARE x integer; y integer;
+BEGIN
+
+IF ((select project.status from project where project.pid = NEW.pid) != 'Cancelled' OR ((select project.status from project where project.pid = NEW.pid) != 'Suspended') OR ((select project.status from project where project.pid = NEW.pid) != 'Unsuccessful') OR ((select project.status from project where project.pid = NEW.pid) != 'Successful')) 
+THEN
+x := (select targetAmt from project where pID = NEW.pID);
+Y := (select sum(famount) from funds where pID = NEW.pID);
+
+IF (y >= x)
+THEN update project set status = 'Fully Funded' where pID = NEW.pID;
+ELSE update project set status = 'On-going' where pID = NEW.pID;
+END IF;
+
+
+ELSE
+x := (select targetAmt from project where pID = OLD.pID);
+Y := (select sum(famount) from funds where pID = OLD.pID);
+
+IF (y >= x)
+THEN update project set status = 'Fully Funded' where pID = OLD.pID;
+ELSE update project set status = 'On-going' where pID = OLD.pID;
+END IF;
+END IF;
+
+
+RETURN NULL;
+
+END;
+$$ LANGUAGE plpgsql;
+
+
+
+CREATE TRIGGER project_status
+AFTER INSERT OR DELETE ON funds 
+FOR EACH ROW
+EXECUTE PROCEDURE tally_projectFunds();
+
+
+
+/* trigger to reject creation of project when credibility score is low */
+CREATE OR REPLACE FUNCTION low_credit()
+RETURNS TRIGGER AS $lowcredit$
+DECLARE countCancelledSuspended numeric ; countTotal numeric;
+BEGIN
+countCancelledSuspended := (SELECT COUNT(*) * 1.00 FROM Project p
+WHERE p.creatorName = NEW.creatorName AND (p.status = 'Cancelled' OR p.status = 'Suspended') AND (p.Is_countedInCredibilityScore = 't'));
+countTotal := (SELECT COUNT(*) * 1.00 FROM Project p
+WHERE p.creatorName = NEW.creatorName AND (p.Is_countedInCredibilityScore = 't'));
+
+IF (countCancelledSuspended = 0 OR countTotal = 0) THEN
+RETURN NEW;
+ELSE
+    IF (countCancelledSuspended / countTotal > 0.7)
+    THEN RAISE EXCEPTION 'You have cancelled/suspended too many projects, please contact our staff to unlock your account!';
+    RETURN NULL;
+    ELSE RETURN NEW;
+    END IF;
+END IF;
+RETURN NEW;
+END;
+$lowcredit$ LANGUAGE plpgsql;
+
+
+
+CREATE TRIGGER check_low_credit
+BEFORE INSERT ON Project
+FOR EACH ROW EXECUTE PROCEDURE low_credit();
+
+
+/* Trigger to ensure that the number of ProjectTiers created do not exceed the limit 
+Limit is computed based on how many digits the project’s target amount is. Eg: a target amount of $50000 -> 5 digits -> 5 tiers in total!  */
+
+/*ALSO, this trigger also enforce that the tier “numbering” do not exceed the limit. Eg: Using above example, if there are already 4 tiers set, the 5th tier cannot have ‘Tier’ of 7, which is more than 5. */
+CREATE OR REPLACE FUNCTION check_tiers()
+RETURNS TRIGGER AS $check_tiers$ 
+DECLARE targetRange numeric; countTiers numeric; counter numeric;
+BEGIN
+
+    countTiers := (SELECT COUNT(tier) FROM ProjectTiers pt WHERE pt.pId = NEW.pId);
+    targetRange := (SELECT targetAmt FROM project p WHERE p.pId = NEW.pId);
+    counter := 0;
+    RAISE NOTICE 'countTiers is % ' ,countTiers; 
+    
+    WHILE (targetRange >= 1) LOOP
+        counter := counter + 1;
+        targetRange := targetRange / 10;
+    END LOOP;
+    
+    IF (countTiers >= counter  ) THEN
+    RAISE NOTICE 'Based on your Project''s Target Amount, you have reached max number of tiers!';
+    RETURN NULL;
+    ELSIF (NEW.tier > counter ) THEN 
+    RAISE NOTICE 'Your Tier level chosen: (%) is more than the max tier level of (%)!' , NEW.tier, counter; 
+    RETURN NULL;
+    ELSE
+    END IF;
+    RETURN NEW;
+END;
+$check_tiers$
+LANGUAGE plpgsql;
+
+CREATE TRIGGER check_Max_Tiers
+BEFORE INSERT on ProjectTiers
+FOR EACH ROW 
+EXECUTE PROCEDURE check_tiers();
+
+
+/************************* All Functions for front end *************************/
+
+/*login for normal user*/
+CREATE OR REPLACE FUNCTION do_Login(inname varchar(100), inpassword varchar(100))
+RETURNS varchar(100) AS 
+$$ BEGIN
+    IF exists (select 1 from normaluser where normaluser.name = inname AND normaluser.password = inpassword)
+    THEN return inname;
+
+    END IF;
+    RETURN 'False';
+END;
+$$ LANGUAGE plpgsql;
+
+
+
+/*login for admin*/
+CREATE OR REPLACE FUNCTION do_adminLogin(inname varchar(100), inpassword varchar(100))
+RETURNS varchar(100) AS 
+$$ BEGIN
+    IF exists (select 1 from admin where admin.name = inname AND admin.password = inpassword)
+    THEN return inname;
+
+    END IF;
+    RETURN 'False'; 
+END;
+$$ LANGUAGE plpgsql;
+
+
+
+/*retrieve all on-going projects for funder*/
+CREATE OR REPLACE FUNCTION getAllOnGoingProjects()
+RETURNS TABLE( pId integer,
+    startDate DATE,
+    deadLine DATE,
+    targetAmt numeric(10,2),
+    status varchar(50),
+    adminName varchar(250),
+    catName varchar(50),
+    projectDescription varchar(250), 
+    creatorName varchar(250),
+    Is_countedInCredibilityScore boolean ) AS 
+$$ BEGIN
+
+    RETURN QUERY
+    Select * from project WHERE p.status = 'On-going';
+    
+END;
+$$ LANGUAGE plpgsql;
+
+
+
+/*retrieve all ongoing projects by category for funder*/
+CREATE OR REPLACE FUNCTION getProjectByCategory(inCat varchar(100))
+RETURNS TABLE( pId integer,
+    startDate DATE,
+    deadLine DATE,
+    targetAmt numeric(10,2),
+    status varchar(50),
+    adminName varchar(250),
+    catName varchar(50),
+    projectDescription varchar(250), 
+    creatorName varchar(250),
+    Is_countedInCredibilityScore boolean ) AS 
+$$ BEGIN
+
+    RETURN QUERY
+    select * from project
+    where project.catname = inCat AND project.Is_countedInCredibilityScore = 't' AND project.status = 'On-going';
+
+    
+END;
+$$ LANGUAGE plpgsql;
+
+
+/*create user*/
+CREATE OR REPLACE FUNCTION do_create(inname varchar(100), inpassword varchar(100), inemail varchar(100))
+RETURNS void AS 
+$$ BEGIN
+    insert into normaluser
+    values (inname, inpassword, inemail, default);
+
+    END;
+$$ LANGUAGE plpgsql;
+
+
+/*Cancel  project ONLY ONGOING PROJECT CAN BE CANCELLED*/
+CREATE OR REPLACE FUNCTION cancelproject(inpid integer)
+RETURNS boolean AS 
+$$ BEGIN
+    IF EXISTS (SELECT 1 from Project where Project.pid = inpid AND Project.status = 'On-going')
+    THEN UPDATE Project SET status = 'Cancelled' 
+    where Project.pid = inpid;
+    RETURN TRUE;
+    END IF;
+    RETURN FALSE;
+END;
+$$ LANGUAGE plpgsql;
+
+
+/*Deactivates normal user*/
+CREATE OR REPLACE FUNCTION deactivate_NormalUser(inname varchar(100))
+RETURNS boolean AS 
+$$ BEGIN
+    update normaluser
+    set is_activated = 'f'
+    where normaluser.name = inname;
+
+    update project
+    set status = 'Suspended'
+    where creatorname = inname;
+
+    IF not exists (select 1 from project where project.creatorname = inname AND status <> 'Suspended')
+    THEN return true;
+
+    END IF;
+    return false;
+END;
+$$ LANGUAGE plpgsql;
+
+
+/*Unlock user account to allow he/she creates new project after their account been unlock due to low credibility 
+Unlock user account*/
+CREATE OR REPLACE FUNCTION unlock_lowcreditAccount(inputname varchar(100))
+RETURNS boolean AS
+$$ BEGIN
+    UPDATE Project SET Is_countedInCredibilityScore = 'f'
+    WHERE Project.creatorName = inputname;
+    RETURN TRUE;
+END;
+$$LANGUAGE plpgsql;
+
+
+/*withdrawfunding using foundername and project id, can only withdraw funding for on-going or fully funded project, and funding record must be present in fund table*/
+CREATE OR REPLACE FUNCTION withdrawfunding(inputname varchar(100), inputprojectid integer) 
+RETURNS boolean AS
+$$ BEGIN 
+    IF EXISTS (SELECT 1 FROM Project p WHERE p.pId = inputprojectid AND p.status = 'On-going' )
+    THEN DELETE FROM Funds f WHERE (f.pId = inputprojectid AND f.funderName = inputname);
+    RETURN TRUE;
+    END IF;
+    IF EXISTS (SELECT 1 FROM Project p WHERE p.pId = inputprojectid AND p.status = 'Fully Funded' )
+    THEN DELETE FROM Funds f WHERE (f.pId = inputprojectid AND f.funderName = inputname);
+   RETURN TRUE;
+    END IF;
+    RETURN FALSE;
+END;
+$$LANGUAGE plpgsql;
+
+
+/*Complex query to find who is the biggest fan for this particular creator by taking in creator name as the parameter, can display it creator’s dashboard or whatever places you want.  !!!!! IT COULD RETURN ZERO IF NONE OF HIS PROJECT IS FUNDED*/
+CREATE OR REPLACE FUNCTION findbiggestFan(inputCreatorName varchar(100))
+RETURNS TABLE (topfan varchar(50)) AS
+$$ 
+    BEGIN
+    RETURN QUERY
+    WITH allProjectCTE(projectid) AS
+    (SELECT DISTINCT p.pId AS projectid FROM Project p WHERE p.creatorName = inputCreatorName),
+
+    result_output AS
+    (SELECT f.funderName AS outputName, count(*) AS outputCount
+    FROM Funds f INNER JOIN allProjectCTE
+    ON allProjectCTE.projectid = f.pId
+    Group BY f.funderName
+    Order BY outputCount DESC
+    LIMIT 1)
+    SELECT outputName FROM result_output;
+END;
+$$ LANGUAGE plpgsql;
+
+
+
+
+/*14. Complex query: Find top donor for each category*/
+CREATE OR REPLACE FUNCTION findTopDonorForEachCategory()
+RETURNS TABLE ( Category varchar(50), Donor varchar(50),AmountFunded bigint) AS
+$$ 
+    BEGIN
+    RETURN QUERY
+
+    WITH CTE1 AS (
+    select m.catname as category, sum(famount) as sum, f.fundername as funder
+    From managedCategory m left join  (funds f natural join project p) on m.catname = p.catname
+    group by category, funder),
+    
+    CTE2 AS (
+    Select * 
+    From project natural join funds
+)
+
+    Select X.category, Y.name as funder, Y.sum as amount
+    From 
+    
+(Select c.category, max(c.sum) as sum
+    From CTE1 C
+    Group by c.category) as X
+
+    left join 
+
+    (Select C.fundername as name, sum(C.famount) as sum , C.catname as category
+    From CTE2 C
+    Group by C.fundername, category) AS Y 
+
+on X.category = Y.category AND X.sum = Y.sum;
+    
+        
+END;
+$$ LANGUAGE plpgsql;
+
+
+
+/*15. Complex query, find another user who funds at least one same project as our user, displays user name on the dashboard, if user never fund any project, this function will return nothing/null*/
+
+CREATE OR REPLACE FUNCTION findUserSharesCommonInterest(inputname varchar(250))
+RETURNS Table(
+    userName varchar(250)) AS
+
+$$ BEGIN
+    RETURN QUERY
+    WITH allFundedProject AS
+        (SELECT DISTINCT p.pId AS projectid FROM Funds f NATURAL JOIN Project p WHERE f.funderName = inputname)
+
+    SELECT DISTINCT f.funderName AS outputName
+    FROM Funds f INNER JOIN allFundedProject al
+    ON f.pId = al.projectid
+    WHERE f.funderName != inputname
+    Order BY outputName DESC
+    LIMIT 3;
+END;
+$$ LANGUAGE plpgsql;
+
+
+
+/* Update all project status */
+CREATE OR REPLACE FUNCTION updateAllStatus()
+RETURNS VOID AS 
+$$ BEGIN
+
+Update project
+set status = 'Unsuccessful'
+where project.deadline <= now() AND project.status = 'On-going';
+Update project
+set status = 'Successful'
+where project.deadline <= now() AND project.status = 'Fully Funded';
+
+
+        
+END;
+$$ LANGUAGE plpgsql;
+
+
+/*Create project*/
+CREATE OR REPLACE FUNCTION createProject(inStartDate Date, inDeadline Date, inTargetAmt integer, inCategory varchar(100), inDesc varchar(100), inNormalUser varchar(100) )
+RETURNS BOOLEAN AS 
+$$ BEGIN
+
+/*IF exists (select 1 from project where project.startDate = inStartDate AND project.deadline = inDeadline AND project.targetAmt = inTargetAmt AND project.catName = inCategory AND project.projectDescription = inDesc AND project.createrName = inNormalUser)*/
+IF exists (select 1 from project where project.startDate = inStartDate AND project.deadline = inDeadline AND project.targetAmt = inTargetAmt AND project.catName = inCategory AND project.projectDescription = inDesc)
+THEN RETURN FALSE;
+END IF;
+
+Insert into project values (Default, inStartDate, inDeadline, inTargetAmt, Default, 'Admin', inCategory, inDesc, inNormalUser, default);
+
+
+IF exists (select 1 from project where project.startDate = inStartDate AND project.deadline = inDeadline AND project.targetAmt = inTargetAmt AND project.catName = inCategory AND project.projectDescription = inDesc)
+THEN RETURN TRUE;
+END IF;
+
+RETURN FALSE;
+END;
+$$ LANGUAGE plpgsql; 
+
+
+/* Retrieve all projects a funder funded*/
+CREATE OR REPLACE FUNCTION showFundersProjects(inName varchar(100))
+RETURNS TABLE( pId integer, startDate DATE, deadLine DATE,  targetAmt numeric(10,2),
+    status varchar(50), catName varchar(50), projectDescription varchar(250), creatorName varchar(250)) AS 
+
+
+$$ BEGIN
+    RETURN QUERY
+
+Select project.pid, project.startdate, project.deadline, project.targetamt, project.status, project.catname, project.projectdescription, project.creatorname
+from Project inner join (select f.pid from funds f where f.fundername = inName) AS X on Project.pid = X.pid;
+  
+
+END;
+$$ LANGUAGE plpgsql;
+/* Insert project tiers */
+CREATE OR REPLACE FUNCTION insertTiers(inTier integer, inDesc varchar(100), inAmount integer, inPid integer )
+RETURNS BOOLEAN AS 
+$$ BEGIN
+
+IF exists (select 1 from projecttiers p where p.tier = inTier AND p.description = inDesc AND p.amount = inAmount AND p.pid = inPID)
+THEN Delete from projecttiers where projecttiers.pid = inPid;
+Delete from project where project.pid = inPid;
+
+RETURN FALSE;
+ELSE insert into projecttiers values (inTier, inDesc, inAmount, InPid);
+END IF;
+
+IF exists(select 1 from projecttiers p where p.tier = inTier AND p.description = inDesc AND p.amount = inAmount AND p.pid = inPID)
+THEN RETURN TRUE;
+ELSE Delete from project where project.pid = inPid;
+Delete from projecttiers where projecttiers.pid = inPid;
+RETURN FALSE;
+END IF;
+
+END;
+$$ LANGUAGE plpgsql; 
+
+
+
+
+
+/*Datainit*/
+
+
+insert into normaluser values ('User1', 'password', 'user1@gmail.com', default);
+insert into normaluser values ('User2', 'password', 'user2@gmail.com', default);
+insert into normaluser values ('User3', 'password', 'user3@gmail.com', default);
+
+insert into admin values ('Admin', 'password', 'admin@gmail.com');
+
+insert into managedcategory values ('sports', 'Admin', 'Anything to do with sports', default);
+insert into managedcategory values ('books', 'Admin', 'Anything to do with books', default);
+insert into managedcategory values ('science', 'Admin', 'Anything to do with science', default);
+
+
+
+/* Additional queries needed when time is involed */
+/*To test for changes in project status */
+
+/*
+1) Use website to create a project
+    i) Change deadline to yesterday  [Update project set startDate = TO_DATE('YYYY-MM-DD', 'YYYY/MM/DD') where pid = xx;]
+    ii) Project status should be changed to unsuccessful
+
+2) Use website to create a project
+    i) Log in as another user to fund the same project
+    ii) Project status should be changed to Fully Funded
+    iii) Change deadline to yesterday [Update project set startDate = TO_DATE('YYYY-MM-DD', 'YYYY/MM/DD') where pid = xx;]
+    iv) Project status should be changed to successful
+
+3) Use website to create a project
+    i) Change deadline to yesterday [Update project set startDate = TO_DATE('YYYY-MM-DD', 'YYYY/MM/DD') where pid = xx;]
+    ii) Project status should be chnged to unsuccessful
+
+*/
